@@ -1,11 +1,11 @@
 [package]
 name = "bookgrab"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-description = "Terminal UI for searching AudiobookBay and sending magnets to qBittorrent"
+description = "Terminal UI for finding audiobooks (AudiobookBay → qBittorrent) and EPUB/PDF ebooks (LibGen)"
 license = "MIT"
 repository = "https://github.com/offluencer-com/bookgrab"
-keywords = ["audiobook", "tui", "torrent", "qbittorrent"]
+keywords = ["audiobook", "ebook", "tui", "qbittorrent", "libgen"]
 categories = ["command-line-utilities"]
 exclude = ["docs/", "packaging/"]
 

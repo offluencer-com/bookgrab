@@ -1,9 +1,9 @@
 # Maintainer: offluencer <mail@offluencer.com>
 # Draft: publish a v$pkgver tag on GitHub, then run `updpkgsums` before pushing to the AUR.
 pkgname=bookgrab
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
-pkgdesc="Terminal UI for searching AudiobookBay and sending audiobooks to qBittorrent"
+pkgdesc="Terminal UI for finding audiobooks (AudiobookBay to qBittorrent) and EPUB/PDF ebooks (LibGen)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/offluencer-com/bookgrab"
 license=('MIT')

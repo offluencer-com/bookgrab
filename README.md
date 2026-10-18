@@ -1,8 +1,14 @@
 # bookgrab
 
-**Search [AudiobookBay](https://audiobookbay.lu) from your terminal and send audiobooks
-straight to qBittorrent.** Type a title, browse the results with cover art and details,
-and press Enter to start the download.
+**Find audiobooks and ebooks from your terminal.** Pick what you're looking for
+(**audiobook**, **EPUB** or **PDF**), type a title, browse the results with cover art and
+details, and press Enter:
+
+| Type | Source | What Enter does |
+|---|---|---|
+| ♫ Audiobook | [AudiobookBay](https://audiobookbay.lu) | sends the magnet to qBittorrent → `~/Documents/Audiobooks` |
+| ◧ EPUB | [Library Genesis](https://libgen.li) | downloads the file → `~/Documents/Ebooks` |
+| ▤ PDF | [Library Genesis](https://libgen.li) | downloads the file → `~/Documents/Ebooks` |
 
 ![bookgrab demo](docs/demo.gif)
 
@@ -10,13 +16,15 @@ and press Enter to start the download.
 
 ## Features
 
+- Three search types, colour-coded tabs, switched with `Tab`
 - Interactive terminal UI with a search box, a result list, cover art and book details
-  (author, narrator, format, size, description)
+  (author, narrator, format, size, description; series, publisher, year and pages for ebooks)
 - Cover images use the kitty graphics protocol, Sixel or iTerm2, which covers kitty,
   Ghostty, WezTerm, Konsole, foot, xterm and others. Terminals without image support get
   a Unicode block-character preview.
-- One key sends the magnet to qBittorrent, saving to `~/Documents/Audiobooks` in the
-  `audiobooks` category
+- Audiobooks: one key sends the magnet to qBittorrent, saving to `~/Documents/Audiobooks`
+  in the `audiobooks` category
+- Ebooks: direct download with a progress indicator, saved as `Author - Title.epub`/`.pdf`
 - No account needed. Magnet links are built from the info hash and trackers on the book page.
 - Vim-style and arrow-key navigation, with pagination through all results
 
@@ -28,8 +36,9 @@ and press Enter to start the download.
 
 ## Requirements
 
-- **[qBittorrent](https://www.qbittorrent.org/) is required.** bookgrab finds books and
-  hands them over, and qBittorrent does the actual downloading. Either the desktop app
+- **[qBittorrent](https://www.qbittorrent.org/) is required for audiobooks.** bookgrab finds
+  audiobooks and hands them over, and qBittorrent does the actual downloading. Ebooks
+  (EPUB/PDF) are downloaded by bookgrab itself, so they don't need qBittorrent. Either the desktop app
   (`qbittorrent`) or the headless version (`qbittorrent-nox`) works; see
   [qBittorrent setup](#qbittorrent-setup).
 - For cover images, a terminal with graphics support (kitty, Ghostty, WezTerm, Konsole,
@@ -64,11 +73,16 @@ This puts the `bookgrab` binary in `~/.cargo/bin`, so make sure that directory i
 ## Usage
 
 ```sh
-bookgrab                    # open bookgrab
-bookgrab lord of the rings  # open it and search right away
-bookgrab --config           # print the config file location
+bookgrab                         # open bookgrab (audiobooks selected)
+bookgrab lord of the rings       # search audiobooks right away
+bookgrab --epub lord of the rings  # search EPUB ebooks right away
+bookgrab --pdf linux kernel      # search PDFs right away
+bookgrab --config                # print the config file location
 bookgrab --help
 ```
+
+`-a`/`--audio`, `-e`/`--epub` and `-p`/`--pdf` only choose the starting type: you can
+switch any time inside the app.
 
 ### Keys
 
@@ -78,7 +92,8 @@ bookgrab --help
 |---|---|
 | type | enter a title or author |
 | `Enter` | search |
-| `Tab` / `↓` / `Esc` | jump to the results |
+| `Tab` / `Shift+Tab` | switch type: Audiobook → EPUB → PDF (searches again if there's a query) |
+| `↓` / `Esc` | jump to the results |
 | `Esc` (no results yet) | quit |
 
 **Results list**
@@ -88,7 +103,8 @@ bookgrab --help
 | `j` / `k` or `↓` / `↑` | move down / up |
 | `PageDown` / `PageUp` | move 10 results at once |
 | `g` / `G` or `Home` / `End` | first / last result |
-| `Enter` or `d` | **download**: send the selected book to qBittorrent |
+| `Enter` or `d` | **download**: audiobook → qBittorrent, ebook → saved to `~/Documents/Ebooks` |
+| `1` / `2` / `3` | switch to Audiobook / EPUB / PDF and search again |
 | `Shift+J` / `Shift+K` | scroll the description |
 | `l` / `n` / `→` | next page of results |
 | `h` / `p` / `←` | previous page |
@@ -97,8 +113,9 @@ bookgrab --help
 | `q` / `Esc` | quit |
 | `Ctrl+C` | quit (anywhere) |
 
-The bottom line shows what happened: the search status, and `✓ … added via qBittorrent`
-once a book has been sent.
+The bottom line shows what is happening: search status, download progress
+(`↓ Downloading … 45%`) and the result (`✓ … added via qBittorrent`, `✓ … saved to …`).
+Books you've already sent or saved get a `✓` in the list.
 
 ## Configuration
 
@@ -117,7 +134,13 @@ username = ""                          # Web UI login, if enabled
 password = ""
 category = "audiobooks"
 save_path = "~/Documents/Audiobooks"
+
+[libgen]
+base_url = "https://libgen.li"         # mirrors: libgen.li, libgen.gl, libgen.la, libgen.bz
+save_path = "~/Documents/Ebooks"
 ```
+
+Sections added by newer versions are appended to your config automatically.
 
 ### qBittorrent setup
 
@@ -135,6 +158,11 @@ With the desktop app, the default settings work out of the box.
 
 - **No results or connection errors**: AudiobookBay changes domains from time to time.
   Open the site in a browser, check the current address and update `base_url` in the config.
+- **Ebook search fails or times out**: LibGen is slow (several seconds per page) and
+  mirrors come and go. Set `base_url` under `[libgen]` to another mirror, e.g. `https://libgen.gl`.
+- **Few PDF/EPUB results**: LibGen can't filter by file type, so bookgrab filters each
+  page itself and skips up to 3 pages ahead. Press `→` to keep looking, or make the query
+  more specific.
 - **"could not run `qbittorrent`"**: qBittorrent isn't installed, or you use
   `qbittorrent-nox`. In that case set `mode = "webui"`.
 - **Covers look blocky**: your terminal has no graphics protocol, so bookgrab falls
@@ -143,7 +171,7 @@ With the desktop app, the default settings work out of the box.
 ## Roadmap
 
 - [x] AudiobookBay search, details, covers and qBittorrent integration
-- [ ] Ebooks (EPUB/PDF) as a second source
+- [x] Ebooks (EPUB/PDF) from Library Genesis
 - [ ] Desktop GUI
 
 ## Development

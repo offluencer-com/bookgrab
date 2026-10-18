@@ -1,36 +1,131 @@
-//! Interactive terminal UI: search box, result list, cover preview and details.
+//! Interactive terminal UI: search kind tabs, result list, cover preview and details.
 
-use crate::abb::{AbbClient, BookDetails, SearchPage, SearchResult};
-use crate::config::Config;
+use crate::abb::{AbbClient, BookDetails, SearchResult};
+use crate::config::{Config, expand_home};
+use crate::libgen::{Ebook, LibgenClient};
 use crate::torrent;
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use image::DynamicImage;
 use ratatui::DefaultTerminal;
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, ListState, Paragraph, Wrap};
-use ratatui::Frame;
+use ratatui_image::StatefulImage;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::StatefulImage;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const ACCENT: Color = Color::Cyan;
 /// Covers are downscaled before encoding; terminal cells never need more than this.
 const COVER_MAX_PX: u32 = 600;
+/// A cover that failed to load is fetched again when selected after this long.
+const COVER_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// What the user is searching for. Each kind has its own source and colour.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Audiobook,
+    Epub,
+    Pdf,
+}
+
+impl Kind {
+    const ALL: [Kind; 3] = [Kind::Audiobook, Kind::Epub, Kind::Pdf];
+
+    fn label(self) -> &'static str {
+        match self {
+            Kind::Audiobook => "♫ Audiobook",
+            Kind::Epub => "◧ EPUB",
+            Kind::Pdf => "▤ PDF",
+        }
+    }
+
+    fn color(self) -> Color {
+        match self {
+            Kind::Audiobook => Color::Cyan,
+            Kind::Epub => Color::Green,
+            Kind::Pdf => Color::LightRed,
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Kind::Audiobook => "",
+            Kind::Epub => "epub",
+            Kind::Pdf => "pdf",
+        }
+    }
+
+    fn cycle(self, step: isize) -> Kind {
+        let i = Kind::ALL.iter().position(|k| *k == self).unwrap() as isize;
+        Kind::ALL[(i + step).rem_euclid(Kind::ALL.len() as isize) as usize]
+    }
+}
+
+struct Sources {
+    abb: AbbClient,
+    libgen: LibgenClient,
+}
+
+#[derive(Clone)]
+enum Item {
+    Audio(SearchResult),
+    Ebook(Ebook),
+}
+
+impl Item {
+    /// Stable identifier used for caches: book page URL or file md5.
+    fn key(&self) -> &str {
+        match self {
+            Item::Audio(r) => &r.url,
+            Item::Ebook(b) => &b.md5,
+        }
+    }
+
+    fn title(&self) -> &str {
+        match self {
+            Item::Audio(r) => &r.title,
+            Item::Ebook(b) => &b.title,
+        }
+    }
+
+    fn cover_url(&self) -> Option<&String> {
+        match self {
+            Item::Audio(r) => r.cover_url.as_ref(),
+            Item::Ebook(b) => b.cover_url.as_ref(),
+        }
+    }
+
+    fn meta(&self) -> String {
+        let parts: Vec<&str> = match self {
+            Item::Audio(r) => vec![&r.format, &r.size, &r.language, &r.posted],
+            Item::Ebook(b) => vec![&b.authors, &b.year, &b.size, &b.language],
+        };
+        parts.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+    }
+}
+
+struct Results {
+    items: Vec<Item>,
+    page: u32,
+    has_next: bool,
+}
 
 /// Results of background work, delivered back to the UI thread.
 enum Msg {
     Login(Result<()>),
-    Search { query: String, page: u32, result: Result<SearchPage> },
+    Search { seq: u64, result: Result<Results> },
     Details { url: String, result: Result<BookDetails> },
     Cover { url: String, result: Result<DynamicImage> },
-    Sent { title: String, result: Result<String> },
+    Sent { key: String, title: String, result: Result<String> },
+    Progress { title: String, downloaded: u64, total: Option<u64> },
+    Saved { key: String, title: String, result: Result<PathBuf> },
 }
 
 #[derive(PartialEq)]
@@ -42,49 +137,61 @@ enum Focus {
 enum Cover {
     Loading,
     Ready(Box<StatefulProtocol>),
-    Failed,
+    Failed(Instant),
 }
 
 struct App {
     config: Config,
-    client: Arc<AbbClient>,
+    sources: Arc<Sources>,
     picker: Picker,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 
+    kind: Kind,
     focus: Focus,
     input: String,
     query: String,
+    /// Incremented per search so late responses from older searches are ignored.
+    search_seq: u64,
     page: u32,
     has_next: bool,
     searching: bool,
-    results: Vec<SearchResult>,
+    results: Vec<Item>,
     list: ListState,
     details_scroll: u16,
 
     details: HashMap<String, Result<BookDetails, String>>,
     covers: HashMap<String, Cover>,
-    /// Detail pages currently being fetched, keyed by book URL.
+    /// Audiobook detail pages currently being fetched, keyed by book URL.
     pending_details: HashSet<String>,
-    /// Books the user asked to download whose details are still loading.
+    /// Audiobooks the user asked to download whose details are still loading.
     download_queue: HashSet<String>,
+    /// Ebooks being downloaded, keyed by md5.
+    downloading: HashSet<String>,
+    /// Items already sent to qBittorrent or saved, marked ✓ in the list.
+    done: HashSet<String>,
 
     status: Line<'static>,
     quit: bool,
 }
 
-pub fn run(config: Config, picker: Picker, initial_query: Option<String>) -> Result<()> {
-    let client = Arc::new(AbbClient::new(&config.abb.base_url)?);
+pub fn run(config: Config, picker: Picker, kind: Kind, initial_query: Option<String>) -> Result<()> {
+    let sources = Arc::new(Sources {
+        abb: AbbClient::new(&config.abb.base_url)?,
+        libgen: LibgenClient::new(&config.libgen.base_url)?,
+    });
     let (tx, rx) = mpsc::channel();
     let mut app = App {
         config,
-        client,
+        sources,
         picker,
         tx,
         rx,
+        kind,
         focus: Focus::Search,
         input: String::new(),
         query: String::new(),
+        search_seq: 0,
         page: 1,
         has_next: false,
         searching: false,
@@ -95,16 +202,16 @@ pub fn run(config: Config, picker: Picker, initial_query: Option<String>) -> Res
         covers: HashMap::new(),
         pending_details: HashSet::new(),
         download_queue: HashSet::new(),
-        status: Line::from("Type a title or author and press Enter"),
+        downloading: HashSet::new(),
+        done: HashSet::new(),
+        status: Line::from("Pick what to search for with Tab, type a title or author and press Enter"),
         quit: false,
     };
 
     if !app.config.abb.username.is_empty() {
-        let (client, cfg, tx) = (app.client.clone(), app.config.abb.clone(), app.tx.clone());
+        let cfg = app.config.abb.clone();
         app.status = Line::from("Logging in to AudiobookBay…");
-        std::thread::spawn(move || {
-            let _ = tx.send(Msg::Login(client.login(&cfg.username, &cfg.password)));
-        });
+        app.spawn(move |s| Msg::Login(s.abb.login(&cfg.username, &cfg.password)));
     }
     if let Some(q) = initial_query {
         app.input = q;
@@ -145,36 +252,68 @@ impl App {
         match self.focus {
             Focus::Search => match key.code {
                 KeyCode::Enter => self.submit_search(),
-                KeyCode::Esc if !self.results.is_empty() => self.focus = Focus::List,
+                KeyCode::Tab => self.set_kind(self.kind.cycle(1)),
+                KeyCode::BackTab => self.set_kind(self.kind.cycle(-1)),
+                KeyCode::Esc | KeyCode::Down if !self.results.is_empty() => self.focus = Focus::List,
                 KeyCode::Esc => self.quit = true,
                 KeyCode::Backspace => {
                     self.input.pop();
                 }
                 KeyCode::Char(c) => self.input.push(c),
-                KeyCode::Down | KeyCode::Tab if !self.results.is_empty() => self.focus = Focus::List,
                 _ => {}
             },
             Focus::List => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
                 KeyCode::Char('/') | KeyCode::Char('s') | KeyCode::Tab => self.focus = Focus::Search,
+                KeyCode::Char('1') => self.set_kind(Kind::Audiobook),
+                KeyCode::Char('2') => self.set_kind(Kind::Epub),
+                KeyCode::Char('3') => self.set_kind(Kind::Pdf),
                 KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
                 KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
                 KeyCode::PageDown => self.move_selection(10),
                 KeyCode::PageUp => self.move_selection(-10),
                 KeyCode::Home | KeyCode::Char('g') => self.select(0),
                 KeyCode::End | KeyCode::Char('G') => self.select(self.results.len().saturating_sub(1)),
+                KeyCode::Char('J') => self.details_scroll = self.details_scroll.saturating_add(3),
+                KeyCode::Char('K') => self.details_scroll = self.details_scroll.saturating_sub(3),
                 KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('l') if self.has_next => {
                     self.load_page(self.page + 1)
                 }
                 KeyCode::Left | KeyCode::Char('p') | KeyCode::Char('h') if self.page > 1 => {
                     self.load_page(self.page - 1)
                 }
-                KeyCode::Char('J') => self.details_scroll = self.details_scroll.saturating_add(3),
-                KeyCode::Char('K') => self.details_scroll = self.details_scroll.saturating_sub(3),
                 KeyCode::Enter | KeyCode::Char('d') => self.download_selected(),
                 KeyCode::Char('o') => self.open_in_browser(),
                 _ => {}
             },
+        }
+    }
+
+    /// Switches what we search for; repeats the current search right away if there is one.
+    fn set_kind(&mut self, kind: Kind) {
+        if kind == self.kind {
+            return;
+        }
+        self.kind = kind;
+        self.results.clear();
+        self.list.select(None);
+        self.page = 1;
+        self.has_next = false;
+        self.search_seq += 1;
+        self.searching = false;
+        self.focus = Focus::Search;
+        if self.input.trim().is_empty() {
+            self.status = Line::from(format!("Searching for {} now; type a title or author", self.kind_name()));
+        } else {
+            self.submit_search();
+        }
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self.kind {
+            Kind::Audiobook => "audiobooks",
+            Kind::Epub => "EPUB ebooks",
+            Kind::Pdf => "PDF ebooks",
         }
     }
 
@@ -196,16 +335,16 @@ impl App {
         self.load_selected();
     }
 
-    fn selected(&self) -> Option<&SearchResult> {
+    fn selected(&self) -> Option<&Item> {
         self.list.selected().and_then(|i| self.results.get(i))
     }
 
     // ---------- background work ----------
 
-    fn spawn(&self, job: impl FnOnce(&AbbClient) -> Msg + Send + 'static) {
-        let (client, tx) = (self.client.clone(), self.tx.clone());
+    fn spawn(&self, job: impl FnOnce(&Sources) -> Msg + Send + 'static) {
+        let (sources, tx) = (self.sources.clone(), self.tx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(job(&client));
+            let _ = tx.send(job(&sources));
         });
     }
 
@@ -219,23 +358,49 @@ impl App {
     }
 
     fn load_page(&mut self, page: u32) {
+        self.search_seq += 1;
         self.searching = true;
-        self.status = Line::from(format!("Searching “{}” (page {page})…", self.query));
-        let query = self.query.clone();
-        self.spawn(move |c| Msg::Search { result: c.search(&query, page), query, page });
+        self.status = Line::from(format!("Searching {} for “{}” (page {page})…", self.kind_name(), self.query));
+        let (seq, query, kind) = (self.search_seq, self.query.clone(), self.kind);
+        self.spawn(move |s| {
+            let result = match kind {
+                Kind::Audiobook => s.abb.search(&query, page).map(|r| Results {
+                    items: r.results.into_iter().map(Item::Audio).collect(),
+                    page,
+                    has_next: r.has_next,
+                }),
+                Kind::Epub | Kind::Pdf => s.libgen.search(&query, kind.extension(), page).map(|r| Results {
+                    items: r.results.into_iter().map(Item::Ebook).collect(),
+                    page: r.page,
+                    has_next: r.page < r.total_pages,
+                }),
+            };
+            Msg::Search { seq, result }
+        });
     }
 
-    /// Starts fetching the cover and details of the selected book, unless already cached.
+    /// Starts fetching the cover (and audiobook details) of the selected item, unless cached.
     fn load_selected(&mut self) {
-        let Some(book) = self.selected().cloned() else { return };
+        let Some(item) = self.selected().cloned() else { return };
 
-        if let Some(cover_url) = book.cover_url.clone() {
-            if !self.covers.contains_key(&cover_url) {
+        if let Some(cover_url) = item.cover_url().cloned() {
+            let retry = match self.covers.get(&cover_url) {
+                None => true,
+                Some(Cover::Failed(at)) => at.elapsed() >= COVER_RETRY_AFTER,
+                Some(_) => false,
+            };
+            if retry {
                 self.covers.insert(cover_url.clone(), Cover::Loading);
-                self.spawn(move |c| Msg::Cover { result: fetch_cover(c, &cover_url), url: cover_url });
+                let from_libgen = matches!(item, Item::Ebook(_));
+                self.spawn(move |s| {
+                    let bytes = if from_libgen { s.libgen.fetch_cover(&cover_url) } else { s.abb.fetch_bytes(&cover_url) };
+                    Msg::Cover { result: bytes.and_then(|b| decode_cover(&b)), url: cover_url }
+                });
             }
         }
-        self.load_details(&book.url);
+        if let Item::Audio(book) = item {
+            self.load_details(&book.url);
+        }
     }
 
     fn load_details(&mut self, url: &str) {
@@ -243,36 +408,62 @@ impl App {
             return;
         }
         let url = url.to_string();
-        self.spawn(move |c| Msg::Details { result: c.details(&url), url });
+        self.spawn(move |s| Msg::Details { result: s.abb.details(&url), url });
     }
 
     fn download_selected(&mut self) {
-        let Some(book) = self.selected().cloned() else { return };
-        match self.details.get(&book.url) {
-            Some(Ok(details)) => self.send_magnet(details.clone()),
-            Some(Err(e)) => self.status = error_line(format!("Cannot download: {e}")),
-            None => {
-                self.status = Line::from(format!("Fetching magnet for “{}”…", book.title));
-                self.download_queue.insert(book.url.clone());
-                self.load_details(&book.url);
-            }
+        match self.selected().cloned() {
+            Some(Item::Audio(book)) => match self.details.get(&book.url) {
+                Some(Ok(details)) => self.send_magnet(book.url.clone(), details.clone()),
+                Some(Err(e)) => self.status = error_line(format!("Cannot download: {e}")),
+                None => {
+                    self.status = Line::from(format!("Fetching magnet for “{}”…", book.title));
+                    self.download_queue.insert(book.url.clone());
+                    self.load_details(&book.url);
+                }
+            },
+            Some(Item::Ebook(book)) => self.download_ebook(book),
+            None => {}
         }
     }
 
-    fn send_magnet(&mut self, details: BookDetails) {
+    fn send_magnet(&mut self, key: String, details: BookDetails) {
         self.status = Line::from(format!("Sending “{}” to qBittorrent…", details.title));
         let cfg = self.config.qbittorrent.clone();
-        let tx = self.tx.clone();
-        std::thread::spawn(move || {
+        self.spawn(move |_| {
             let result = torrent::add_magnet(&cfg, &details.magnet());
-            let _ = tx.send(Msg::Sent { title: details.title, result });
+            Msg::Sent { key, title: details.title, result }
+        });
+    }
+
+    fn download_ebook(&mut self, book: Ebook) {
+        if !self.downloading.insert(book.md5.clone()) {
+            self.status = Line::from(format!("“{}” is already downloading", book.title));
+            return;
+        }
+        self.status = Line::from(format!("Downloading “{}”…", book.title));
+        let dir = expand_home(&self.config.libgen.save_path);
+        let (sources, tx) = (self.sources.clone(), self.tx.clone());
+        std::thread::spawn(move || {
+            let mut last_report = Instant::now();
+            let result = sources.libgen.download(&book, &dir, |downloaded, total| {
+                if last_report.elapsed() >= Duration::from_millis(200) {
+                    last_report = Instant::now();
+                    let _ = tx.send(Msg::Progress { title: book.title.clone(), downloaded, total });
+                }
+            });
+            let _ = tx.send(Msg::Saved { key: book.md5.clone(), title: book.title.clone(), result });
         });
     }
 
     fn open_in_browser(&mut self) {
-        let Some(book) = self.selected() else { return };
+        let url = match self.selected() {
+            Some(Item::Audio(r)) => r.url.clone(),
+            Some(Item::Ebook(b)) => format!("{}/ads.php?md5={}", self.config.libgen.base_url, b.md5),
+            None => return,
+        };
         let opened = std::process::Command::new("xdg-open")
-            .arg(&book.url)
+            .arg(&url)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn();
@@ -285,21 +476,20 @@ impl App {
         match msg {
             Msg::Login(Ok(())) => self.status = Line::from("Logged in to AudiobookBay"),
             Msg::Login(Err(e)) => self.status = error_line(format!("{e:#}")),
-            Msg::Search { query, page, result } => {
-                // Ignore responses for searches the user has since replaced.
-                if query != self.query {
+            Msg::Search { seq, result } => {
+                if seq != self.search_seq {
                     return;
                 }
                 self.searching = false;
                 match result {
                     Ok(found) => {
-                        self.page = page;
+                        self.page = found.page;
                         self.has_next = found.has_next;
-                        self.results = found.results;
+                        self.results = found.items;
                         self.status = if self.results.is_empty() {
-                            Line::from(format!("No results for “{query}”"))
+                            Line::from(format!("No {} found for “{}”", self.kind_name(), self.query))
                         } else {
-                            Line::from(format!("{} results on page {page}", self.results.len()))
+                            Line::from(format!("{} results on page {}", self.results.len(), self.page))
                         };
                         if !self.results.is_empty() {
                             self.focus = Focus::List;
@@ -314,7 +504,7 @@ impl App {
                 let result = result.map_err(|e| format!("{e:#}"));
                 if self.download_queue.remove(&url) {
                     match &result {
-                        Ok(details) => self.send_magnet(details.clone()),
+                        Ok(details) => self.send_magnet(url.clone(), details.clone()),
                         Err(e) => self.status = error_line(format!("Cannot download: {e}")),
                     }
                 }
@@ -323,17 +513,34 @@ impl App {
             Msg::Cover { url, result } => {
                 let cover = match result {
                     Ok(img) => Cover::Ready(Box::new(self.picker.new_resize_protocol(img))),
-                    Err(_) => Cover::Failed,
+                    Err(_) => Cover::Failed(Instant::now()),
                 };
                 self.covers.insert(url, cover);
             }
-            Msg::Sent { title, result } => {
+            Msg::Sent { key, title, result } => {
                 self.status = match result {
-                    Ok(via) => Line::from(vec![
-                        Span::styled("✓ ", Style::new().fg(Color::Green).bold()),
-                        Span::raw(format!("“{title}” added via {via} → {}", self.config.qbittorrent.save_path)),
-                    ]),
+                    Ok(via) => {
+                        self.done.insert(key);
+                        ok_line(format!("“{title}” added via {via} → {}", self.config.qbittorrent.save_path))
+                    }
                     Err(e) => error_line(format!("qBittorrent: {e:#}")),
+                }
+            }
+            Msg::Progress { title, downloaded, total } => {
+                let amount = match total {
+                    Some(t) if t > 0 => format!("{}% ({} / {})", downloaded * 100 / t, mb(downloaded), mb(t)),
+                    _ => mb(downloaded),
+                };
+                self.status = Line::from(format!("↓ Downloading “{title}” {amount}"));
+            }
+            Msg::Saved { key, title, result } => {
+                self.downloading.remove(&key);
+                self.status = match result {
+                    Ok(path) => {
+                        self.done.insert(key);
+                        ok_line(format!("“{title}” saved to {}", path.display()))
+                    }
+                    Err(e) => error_line(format!("Download failed: {e:#}")),
                 }
             }
         }
@@ -343,7 +550,7 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let [search_area, main_area, status_area] =
-            Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(2)]).areas(f.area());
+            Layout::vertical([Constraint::Length(4), Constraint::Min(5), Constraint::Length(2)]).areas(f.area());
         self.draw_search(f, search_area);
 
         let [list_area, side_area] =
@@ -354,38 +561,62 @@ impl App {
     }
 
     fn draw_search(&self, f: &mut Frame, area: Rect) {
+        let color = self.kind.color();
         let focused = self.focus == Focus::Search;
-        let block = panel(" bookgrab · search AudiobookBay ", focused);
-        let mut spans = vec![Span::styled("❯ ", Style::new().fg(ACCENT)), Span::raw(self.input.clone())];
+
+        let mut tabs = Vec::new();
+        for kind in Kind::ALL {
+            let label = format!(" {} ", kind.label());
+            tabs.push(if kind == self.kind {
+                Span::styled(label, Style::new().bg(kind.color()).fg(Color::Black).bold())
+            } else {
+                Span::styled(label, Style::new().fg(kind.color()).dim())
+            });
+            tabs.push(Span::raw(" "));
+        }
+        let source = match self.kind {
+            Kind::Audiobook => format!("AudiobookBay → qBittorrent → {}", self.config.qbittorrent.save_path),
+            Kind::Epub | Kind::Pdf => format!("LibGen → {}", self.config.libgen.save_path),
+        };
+        tabs.push(Span::styled(format!(" {source}"), Style::new().dim()));
+
+        let mut input = vec![Span::styled("❯ ", Style::new().fg(color)), Span::raw(self.input.clone())];
         if focused {
-            spans.push(Span::styled("█", Style::new().fg(ACCENT).add_modifier(Modifier::SLOW_BLINK)));
+            input.push(Span::styled("█", Style::new().fg(color).add_modifier(Modifier::SLOW_BLINK)));
         }
         if self.searching {
-            spans.push(Span::styled("  searching…", Style::new().dim()));
+            input.push(Span::styled("  searching…", Style::new().dim()));
         }
-        f.render_widget(Paragraph::new(Line::from(spans)).block(block), area);
+
+        let block = panel(" bookgrab · Tab switches type ", focused, color);
+        f.render_widget(Paragraph::new(vec![Line::from(tabs), Line::from(input)]).block(block), area);
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
-        let mut title = format!(" Results · page {} ", self.page);
+        let mut title = format!(" {} · page {} ", self.kind.label(), self.page);
         if self.has_next {
             title.push_str("→ ");
         }
-        let block = panel(&title, self.focus == Focus::List);
+        let block = panel(&title, self.focus == Focus::List, self.kind.color());
+        if self.results.is_empty() {
+            f.render_widget(Paragraph::new(self.welcome()).wrap(Wrap { trim: false }).block(block), area);
+            return;
+        }
         let width = area.width.saturating_sub(4) as usize;
         let items: Vec<ListItem> = self
             .results
             .iter()
-            .map(|r| {
-                let meta = [r.format.as_str(), r.size.as_str(), r.language.as_str(), r.posted.as_str()]
-                    .iter()
-                    .filter(|s| !s.is_empty())
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join(" · ");
+            .map(|item| {
+                let mark = if self.done.contains(item.key()) {
+                    "✓ "
+                } else if self.downloading.contains(item.key()) {
+                    "↓ "
+                } else {
+                    ""
+                };
                 ListItem::new(vec![
-                    Line::from(truncate(&r.title, width)).bold(),
-                    Line::from(truncate(&meta, width)).dim(),
+                    Line::from(truncate(&format!("{mark}{}", item.title()), width)).bold(),
+                    Line::from(truncate(&item.meta(), width)).dim(),
                 ])
             })
             .collect();
@@ -396,18 +627,39 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list);
     }
 
+    /// Shown instead of an empty list: explains the three search types.
+    fn welcome(&self) -> Vec<Line<'static>> {
+        let row = |kind: Kind, text: &str| {
+            let marker = if kind == self.kind { "▸ " } else { "  " };
+            Line::from(vec![
+                Span::styled(format!("{marker}{:<13}", kind.label()), Style::new().fg(kind.color()).bold()),
+                Span::raw(text.to_string()),
+            ])
+        };
+        vec![
+            Line::default(),
+            Line::from("  What are you looking for?").bold(),
+            Line::default(),
+            row(Kind::Audiobook, "AudiobookBay, sent to qBittorrent as a torrent"),
+            row(Kind::Epub, "ebook for e-readers and phones, saved directly"),
+            row(Kind::Pdf, "ebook or document, saved directly"),
+            Line::default(),
+            Line::from("  Tab / Shift+Tab switches the type, Enter searches.").dim(),
+        ]
+    }
+
     fn draw_side(&mut self, f: &mut Frame, area: Rect) {
-        let Some(book) = self.selected().cloned() else {
-            f.render_widget(panel(" Details ", false), area);
+        let Some(item) = self.selected().cloned() else {
+            f.render_widget(panel(" Details ", false, Color::DarkGray), area);
             return;
         };
         let [cover_area, info_area] =
             Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
 
-        let cover_block = panel(" Cover ", false);
+        let cover_block = panel(" Cover ", false, Color::DarkGray);
         let inner = cover_block.inner(cover_area);
         f.render_widget(cover_block, cover_area);
-        match book.cover_url.as_ref().and_then(|u| self.covers.get_mut(u)) {
+        match item.cover_url().and_then(|u| self.covers.get_mut(u)) {
             Some(Cover::Ready(protocol)) => {
                 f.render_stateful_widget(StatefulImage::default(), centered_cover(inner), protocol.as_mut())
             }
@@ -415,10 +667,21 @@ impl App {
             _ => f.render_widget(Paragraph::new("no cover").dim(), inner),
         }
 
-        let mut lines: Vec<Line> = vec![Line::from(book.title.clone()).bold().fg(ACCENT), Line::default()];
-        let field = |label: &str, value: String| {
-            Line::from(vec![Span::styled(format!("{label:<10}"), Style::new().dim()), Span::raw(value)])
+        let lines = match &item {
+            Item::Audio(book) => self.audio_details(book),
+            Item::Ebook(book) => self.ebook_details(book),
         };
+        f.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: true })
+                .scroll((self.details_scroll, 0))
+                .block(panel(" Details · J/K scroll ", false, Color::DarkGray)),
+            info_area,
+        );
+    }
+
+    fn audio_details(&self, book: &SearchResult) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(book.title.clone()).bold().fg(self.kind.color()), Line::default()];
         match self.details.get(&book.url) {
             Some(Ok(d)) => {
                 if !d.authors.is_empty() {
@@ -445,28 +708,45 @@ impl App {
                 lines.push(Line::from("loading details…").dim());
             }
         }
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: true })
-                .scroll((self.details_scroll, 0))
-                .block(panel(" Details · J/K scroll ", false)),
-            info_area,
-        );
+        lines
+    }
+
+    fn ebook_details(&self, book: &Ebook) -> Vec<Line<'static>> {
+        let mut lines = vec![Line::from(book.title.clone()).bold().fg(self.kind.color()), Line::default()];
+        let fields = [
+            ("Author", &book.authors),
+            ("Series", &book.series),
+            ("Publisher", &book.publisher),
+            ("Year", &book.year),
+            ("Language", &book.language),
+            ("Pages", &book.pages),
+            ("Size", &book.size),
+        ];
+        for (label, value) in fields {
+            if !value.is_empty() {
+                lines.push(field(label, value.clone()));
+            }
+        }
+        lines.push(field("Format", book.extension.to_uppercase()));
+        lines.push(Line::default());
+        lines.push(Line::from(format!("Enter saves it to {}", self.config.libgen.save_path)).dim());
+        lines
     }
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let keys = match self.focus {
-            Focus::Search => "enter search · esc results/quit · tab results",
-            Focus::List => "↑↓/jk move · enter/d download · ←→/hn page · o open in browser · / search · q quit",
+            Focus::Search => "enter search · tab/shift+tab switch type · ↓/esc results · esc quit",
+            Focus::List => {
+                "↑↓/jk move · enter download · ←→ page · 1/2/3 type · o browser · / search · q quit"
+            }
         };
         let text = vec![self.status.clone(), Line::from(keys).dim()];
         f.render_widget(Paragraph::new(text), area);
     }
 }
 
-fn fetch_cover(client: &AbbClient, url: &str) -> Result<DynamicImage> {
-    let bytes = client.fetch_bytes(url)?;
-    let img = image::load_from_memory(&bytes)?;
+fn decode_cover(bytes: &[u8]) -> Result<DynamicImage> {
+    let img = image::load_from_memory(bytes)?;
     Ok(if img.width() > COVER_MAX_PX || img.height() > COVER_MAX_PX {
         img.thumbnail(COVER_MAX_PX, COVER_MAX_PX)
     } else {
@@ -474,12 +754,16 @@ fn fetch_cover(client: &AbbClient, url: &str) -> Result<DynamicImage> {
     })
 }
 
-fn panel(title: &str, focused: bool) -> Block<'static> {
-    let color = if focused { ACCENT } else { Color::DarkGray };
+fn panel(title: &str, focused: bool, color: Color) -> Block<'static> {
+    let color = if focused { color } else { Color::DarkGray };
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(color))
         .title(title.to_string())
+}
+
+fn field(label: &str, value: String) -> Line<'static> {
+    Line::from(vec![Span::styled(format!("{label:<10}"), Style::new().dim()), Span::raw(value)])
 }
 
 /// Leaves a one-cell margin so the image doesn't touch the border.
@@ -492,8 +776,16 @@ fn centered_cover(area: Rect) -> Rect {
     }
 }
 
+fn ok_line(msg: String) -> Line<'static> {
+    Line::from(vec![Span::styled("✓ ", Style::new().fg(Color::Green).bold()), Span::raw(msg)])
+}
+
 fn error_line(msg: String) -> Line<'static> {
     Line::from(vec![Span::styled("✗ ", Style::new().fg(Color::Red).bold()), Span::raw(msg)])
+}
+
+fn mb(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1_048_576.0)
 }
 
 fn truncate(s: &str, max: usize) -> String {
