@@ -9,6 +9,7 @@ pub struct Config {
     pub abb: AbbConfig,
     pub qbittorrent: QbitConfig,
     pub libgen: LibgenConfig,
+    pub search: SearchConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,9 +43,30 @@ pub struct LibgenConfig {
     pub save_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchConfig {
+    /// Language filter at startup; "All" shows every language.
+    pub language: String,
+    /// Languages cycled through with L / Ctrl+L, after "All".
+    pub languages: Vec<String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
-        Self { abb: AbbConfig::default(), qbittorrent: QbitConfig::default(), libgen: LibgenConfig::default() }
+        Self {
+            abb: AbbConfig::default(),
+            qbittorrent: QbitConfig::default(),
+            libgen: LibgenConfig::default(),
+            search: SearchConfig::default(),
+        }
+    }
+}
+
+impl Default for SearchConfig {
+    fn default() -> Self {
+        let languages = ["English", "Serbian", "Croatian", "Bosnian", "German", "French", "Spanish", "Italian", "Russian"];
+        Self { language: "All".into(), languages: languages.map(String::from).to_vec() }
     }
 }
 

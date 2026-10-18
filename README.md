@@ -17,6 +17,7 @@ details, and press Enter:
 ## Features
 
 - Three search types, colour-coded tabs, switched with `Tab`
+- Language filter (English, Serbian, Croatian, German…) for all three types, switched with `Ctrl+L`
 - Interactive terminal UI with a search box, a result list, cover art and book details
   (author, narrator, format, size, description; series, publisher, year and pages for ebooks)
 - Cover images use the kitty graphics protocol, Sixel or iTerm2, which covers kitty,
@@ -95,6 +96,7 @@ switch any time inside the app.
 | type | enter a title or author |
 | `Enter` | search |
 | `Tab` / `Shift+Tab` | switch type: Audiobook → EPUB → PDF (searches again if there's a query) |
+| `Ctrl+L` | change the language filter (searches again) |
 | `↓` / `Esc` | jump to the results |
 | `Esc` (no results yet) | quit |
 
@@ -107,6 +109,7 @@ switch any time inside the app.
 | `g` / `G` or `Home` / `End` | first / last result |
 | `Enter` or `d` | **download**: audiobook → qBittorrent, ebook → saved to `~/Documents/Ebooks` |
 | `1` / `2` / `3` | switch to Audiobook / EPUB / PDF and search again |
+| `L` or `Ctrl+L` | change the language filter: All → English → Serbian → … |
 | `Shift+J` / `Shift+K` | scroll the description |
 | `l` / `n` / `→` | next page of results |
 | `h` / `p` / `←` | previous page |
@@ -140,7 +143,14 @@ save_path = "~/Documents/Audiobooks"
 [libgen]
 base_url = "https://libgen.li"         # mirrors: libgen.li, libgen.gl, libgen.la, libgen.bz
 save_path = "~/Documents/Ebooks"
+
+[search]
+language = "All"                       # language filter at startup
+languages = ["English", "Serbian", "Croatian", "Bosnian", "German", "French", "Spanish", "Italian", "Russian"]
 ```
+
+`languages` is the list `Ctrl+L` cycles through after "All"; add or remove any language
+as the sites spell it (e.g. "Portuguese", "Dutch").
 
 Sections added by newer versions are appended to your config automatically.
 
@@ -162,9 +172,9 @@ With the desktop app, the default settings work out of the box.
   Open the site in a browser, check the current address and update `base_url` in the config.
 - **Ebook search fails or times out**: LibGen is slow (several seconds per page) and
   mirrors come and go. Set `base_url` under `[libgen]` to another mirror, e.g. `https://libgen.gl`.
-- **Few PDF/EPUB results**: LibGen can't filter by file type, so bookgrab filters each
-  page itself and skips up to 3 pages ahead. Press `→` to keep looking, or make the query
-  more specific.
+- **Few results**: neither site can filter by file type or language, so bookgrab filters
+  each page itself and skips up to 3 pages ahead. Press `→` to keep looking, set the
+  language back to "All", or make the query more specific.
 - **"could not run `qbittorrent`"**: qBittorrent isn't installed, or you use
   `qbittorrent-nox`. In that case set `mode = "webui"`.
 - **Covers look blocky**: your terminal has no graphics protocol, so bookgrab falls

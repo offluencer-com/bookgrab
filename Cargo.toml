@@ -1,6 +1,6 @@
 [package]
 name = "bookgrab"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Terminal UI for finding audiobooks (AudiobookBay → qBittorrent) and EPUB/PDF ebooks (LibGen)"
 license = "MIT"

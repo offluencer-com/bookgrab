@@ -26,6 +26,11 @@ use std::time::{Duration, Instant};
 const COVER_MAX_PX: u32 = 600;
 /// A cover that failed to load is fetched again when selected after this long.
 const COVER_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// Neither site can filter by file type or language, so results are filtered here and
+/// pages without a single match are skipped, up to this many pages per search.
+const MAX_PAGES_PER_SEARCH: u32 = 3;
+/// Language filter value that shows every language.
+const ALL_LANGUAGES: &str = "All";
 
 /// What the user is searching for. Each kind has its own source and colour.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -73,6 +78,39 @@ struct Sources {
     libgen: LibgenClient,
 }
 
+impl Sources {
+    /// Fetches pages starting at `page` until one has results of the right type and language.
+    fn search(&self, kind: Kind, query: &str, language: &str, page: u32) -> Result<Results> {
+        let mut page = page.max(1);
+        let last_try = page + MAX_PAGES_PER_SEARCH - 1;
+        loop {
+            let mut found = self.search_page(kind, query, page)?;
+            found.items.retain(|item| item.matches(kind, language));
+            if !found.items.is_empty() || !found.has_next || page >= last_try {
+                return Ok(found);
+            }
+            page += 1;
+        }
+    }
+
+    fn search_page(&self, kind: Kind, query: &str, page: u32) -> Result<Results> {
+        Ok(match kind {
+            Kind::Audiobook => {
+                let r = self.abb.search(query, page)?;
+                Results { items: r.results.into_iter().map(Item::Audio).collect(), page, has_next: r.has_next }
+            }
+            Kind::Epub | Kind::Pdf => {
+                let r = self.libgen.search(query, page)?;
+                Results {
+                    items: r.results.into_iter().map(Item::Ebook).collect(),
+                    page,
+                    has_next: page < r.total_pages,
+                }
+            }
+        })
+    }
+}
+
 #[derive(Clone)]
 enum Item {
     Audio(SearchResult),
@@ -93,6 +131,16 @@ impl Item {
             Item::Audio(r) => &r.title,
             Item::Ebook(b) => &b.title,
         }
+    }
+
+    fn matches(&self, kind: Kind, language: &str) -> bool {
+        let (item_language, type_ok) = match self {
+            Item::Audio(r) => (&r.language, true),
+            Item::Ebook(b) => (&b.language, b.extension.eq_ignore_ascii_case(kind.extension())),
+        };
+        // Some books list several languages ("English; Russian").
+        type_ok
+            && (language == ALL_LANGUAGES || item_language.to_lowercase().contains(&language.to_lowercase()))
     }
 
     fn cover_url(&self) -> Option<&String> {
@@ -148,6 +196,7 @@ struct App {
     rx: Receiver<Msg>,
 
     kind: Kind,
+    language: String,
     focus: Focus,
     input: String,
     query: String,
@@ -181,12 +230,14 @@ pub fn run(config: Config, picker: Picker, kind: Kind, initial_query: Option<Str
         libgen: LibgenClient::new(&config.libgen.base_url)?,
     });
     let (tx, rx) = mpsc::channel();
+    let language = config.search.language.clone();
     let mut app = App {
         config,
         sources,
         picker,
         tx,
         rx,
+        language,
         kind,
         focus: Focus::Search,
         input: String::new(),
@@ -245,8 +296,12 @@ impl App {
     // ---------- input ----------
 
     fn on_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('c') => self.quit = true,
+                KeyCode::Char('l') => self.cycle_language(),
+                _ => {}
+            }
             return;
         }
         match self.focus {
@@ -268,6 +323,7 @@ impl App {
                 KeyCode::Char('1') => self.set_kind(Kind::Audiobook),
                 KeyCode::Char('2') => self.set_kind(Kind::Epub),
                 KeyCode::Char('3') => self.set_kind(Kind::Pdf),
+                KeyCode::Char('L') => self.cycle_language(),
                 KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
                 KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
                 KeyCode::PageDown => self.move_selection(10),
@@ -307,6 +363,27 @@ impl App {
         } else {
             self.submit_search();
         }
+    }
+
+    /// Steps through "All" and the configured languages; repeats the search if there is one.
+    fn cycle_language(&mut self) {
+        let mut options = vec![ALL_LANGUAGES.to_string()];
+        options.extend(self.config.search.languages.iter().cloned());
+        let current = options.iter().position(|l| l.eq_ignore_ascii_case(&self.language));
+        self.language = match current {
+            Some(i) => options[(i + 1) % options.len()].clone(),
+            None => options[0].clone(),
+        };
+        if self.query.is_empty() {
+            self.status = Line::from(format!("Language filter: {}", self.language));
+        } else {
+            self.load_page(1);
+        }
+    }
+
+    /// " in English", or nothing when every language is shown.
+    fn language_suffix(&self) -> String {
+        if self.language == ALL_LANGUAGES { String::new() } else { format!(" in {}", self.language) }
     }
 
     fn kind_name(&self) -> &'static str {
@@ -360,23 +437,14 @@ impl App {
     fn load_page(&mut self, page: u32) {
         self.search_seq += 1;
         self.searching = true;
-        self.status = Line::from(format!("Searching {} for “{}” (page {page})…", self.kind_name(), self.query));
-        let (seq, query, kind) = (self.search_seq, self.query.clone(), self.kind);
-        self.spawn(move |s| {
-            let result = match kind {
-                Kind::Audiobook => s.abb.search(&query, page).map(|r| Results {
-                    items: r.results.into_iter().map(Item::Audio).collect(),
-                    page,
-                    has_next: r.has_next,
-                }),
-                Kind::Epub | Kind::Pdf => s.libgen.search(&query, kind.extension(), page).map(|r| Results {
-                    items: r.results.into_iter().map(Item::Ebook).collect(),
-                    page: r.page,
-                    has_next: r.page < r.total_pages,
-                }),
-            };
-            Msg::Search { seq, result }
-        });
+        self.status = Line::from(format!(
+            "Searching {}{} for “{}” (page {page})…",
+            self.kind_name(),
+            self.language_suffix(),
+            self.query
+        ));
+        let (seq, query, kind, language) = (self.search_seq, self.query.clone(), self.kind, self.language.clone());
+        self.spawn(move |s| Msg::Search { seq, result: s.search(kind, &query, &language, page) });
     }
 
     /// Starts fetching the cover (and audiobook details) of the selected item, unless cached.
@@ -487,7 +555,12 @@ impl App {
                         self.has_next = found.has_next;
                         self.results = found.items;
                         self.status = if self.results.is_empty() {
-                            Line::from(format!("No {} found for “{}”", self.kind_name(), self.query))
+                            Line::from(format!(
+                                "No {}{} found for “{}” (L changes the language, → tries the next page)",
+                                self.kind_name(),
+                                self.language_suffix(),
+                                self.query
+                            ))
                         } else {
                             Line::from(format!("{} results on page {}", self.results.len(), self.page))
                         };
@@ -574,6 +647,9 @@ impl App {
             });
             tabs.push(Span::raw(" "));
         }
+        tabs.push(Span::styled("│ Language: ", Style::new().dim()));
+        tabs.push(Span::styled(self.language.clone(), Style::new().fg(color).bold()));
+        tabs.push(Span::styled(" (ctrl+l) ", Style::new().dim()));
         let source = match self.kind {
             Kind::Audiobook => format!("AudiobookBay → qBittorrent → {}", self.config.qbittorrent.save_path),
             Kind::Epub | Kind::Pdf => format!("LibGen → {}", self.config.libgen.save_path),
@@ -593,7 +669,7 @@ impl App {
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
-        let mut title = format!(" {} · page {} ", self.kind.label(), self.page);
+        let mut title = format!(" {} · {} · page {} ", self.kind.label(), self.language, self.page);
         if self.has_next {
             title.push_str("→ ");
         }
@@ -645,6 +721,7 @@ impl App {
             row(Kind::Pdf, "LibGen, books & documents"),
             Line::default(),
             Line::from("  Tab / Shift+Tab switches the type, Enter searches.").dim(),
+            Line::from("  Ctrl+L (or L in the list) changes the language.").dim(),
         ]
     }
 
@@ -735,9 +812,9 @@ impl App {
 
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let keys = match self.focus {
-            Focus::Search => "enter search · tab/shift+tab switch type · ↓/esc results · esc quit",
+            Focus::Search => "enter search · tab/shift+tab type · ctrl+l language · ↓/esc results · esc quit",
             Focus::List => {
-                "↑↓/jk move · enter download · ←→ page · 1/2/3 type · o browser · / search · q quit"
+                "↑↓/jk move · enter download · ←→ page · 1/2/3 type · L language · o browser · / search · q quit"
             }
         };
         let text = vec![self.status.clone(), Line::from(keys).dim()];
@@ -795,5 +872,47 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
         out.push('…');
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ebook(extension: &str, language: &str) -> Item {
+        Item::Ebook(Ebook { extension: extension.into(), language: language.into(), ..Default::default() })
+    }
+
+    #[test]
+    fn filters_by_type_and_language() {
+        assert!(ebook("epub", "English").matches(Kind::Epub, "English"));
+        assert!(ebook("epub", "English").matches(Kind::Epub, ALL_LANGUAGES));
+        assert!(!ebook("epub", "English").matches(Kind::Pdf, ALL_LANGUAGES));
+        assert!(!ebook("epub", "French").matches(Kind::Epub, "English"));
+        assert!(ebook("pdf", "English; Russian").matches(Kind::Pdf, "russian"));
+
+        let audio = Item::Audio(SearchResult { language: "Spanish".into(), ..Default::default() });
+        assert!(audio.matches(Kind::Audiobook, "Spanish"));
+        assert!(!audio.matches(Kind::Audiobook, "English"));
+    }
+
+    /// Hits the real sites; run with `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_language_filter() {
+        let config = Config::default();
+        let sources = Sources {
+            abb: AbbClient::new(&config.abb.base_url).unwrap(),
+            libgen: LibgenClient::new(&config.libgen.base_url).unwrap(),
+        };
+        for kind in [Kind::Audiobook, Kind::Epub] {
+            let found = sources.search(kind, "hobbit", "English", 1).unwrap();
+            println!("{kind:?}: page {}, {} results", found.page, found.items.len());
+            for item in found.items.iter().take(4) {
+                println!("  {} | {}", item.title(), item.meta());
+            }
+            assert!(!found.items.is_empty());
+            assert!(found.items.iter().all(|i| i.matches(kind, "English")));
+        }
     }
 }

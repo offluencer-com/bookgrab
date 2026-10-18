@@ -9,9 +9,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64; rv:130.0) Gecko/20100101 Firefox/130.0";
-/// LibGen can't filter by extension, so pages (25 results each, several seconds per
-/// request) are filtered locally; this many are tried before giving up on finding a match.
-const MAX_PAGES_PER_SEARCH: u32 = 3;
 
 #[derive(Debug, Clone, Default)]
 pub struct Ebook {
@@ -71,8 +68,6 @@ fn main_author(authors: &str) -> String {
 #[derive(Debug, Clone, Default)]
 pub struct EbookPage {
     pub results: Vec<Ebook>,
-    /// The server page these results came from (may be past the requested one).
-    pub page: u32,
     pub total_pages: u32,
 }
 
@@ -87,27 +82,18 @@ impl LibgenClient {
         Ok(Self { http, base_url: base_url.trim_end_matches('/').to_string() })
     }
 
-    /// Searches for `query`, keeping only files with `extension`. Skips ahead over
-    /// server pages that have no matching files.
-    pub fn search(&self, query: &str, extension: &str, page: u32) -> Result<EbookPage> {
-        let mut page = page.max(1);
-        let last_try = page + MAX_PAGES_PER_SEARCH - 1;
-        loop {
-            let url = format!(
-                "{}/index.php?req={}&columns%5B%5D=t&columns%5B%5D=a&columns%5B%5D=s\
-                 &objects%5B%5D=f&topics%5B%5D=l&topics%5B%5D=f&covers=on&filesuns=all&page={page}",
-                self.base_url,
-                urlencoding::encode(query.trim())
-            );
-            let html = self.http.get(&url).send()?.error_for_status()?.text()?;
-            let mut found = parse_search(&html, &self.base_url);
-            found.results.retain(|b| b.extension.eq_ignore_ascii_case(extension));
-            found.page = page;
-            if !found.results.is_empty() || page >= found.total_pages || page >= last_try {
-                return Ok(found);
-            }
-            page += 1;
-        }
+    /// Fetches one page (25 results, all file types: LibGen can't filter by extension
+    /// or language, so callers filter).
+    pub fn search(&self, query: &str, page: u32) -> Result<EbookPage> {
+        let page = page.max(1);
+        let url = format!(
+            "{}/index.php?req={}&columns%5B%5D=t&columns%5B%5D=a&columns%5B%5D=s\
+             &objects%5B%5D=f&topics%5B%5D=l&topics%5B%5D=f&covers=on&filesuns=all&page={page}",
+            self.base_url,
+            urlencoding::encode(query.trim())
+        );
+        let html = self.http.get(&url).send()?.error_for_status()?.text()?;
+        Ok(parse_search(&html, &self.base_url))
     }
 
     /// LibGen serves covers only with a Referer from its own site.
@@ -242,7 +228,7 @@ pub fn parse_search(html: &str, base: &str) -> EbookPage {
         .and_then(|rest| rest.split(',').next())
         .and_then(|n| n.trim().parse().ok())
         .unwrap_or(1);
-    EbookPage { results, page: 1, total_pages }
+    EbookPage { results, total_pages }
 }
 
 #[cfg(test)]
@@ -307,15 +293,12 @@ mod tests {
     #[ignore]
     fn live_search() {
         let client = LibgenClient::new(BASE).unwrap();
-        for ext in ["epub", "pdf"] {
-            let page = client.search("dune herbert", ext, 1).unwrap();
-            println!("{ext}: page {} of {}, {} results", page.page, page.total_pages, page.results.len());
-            for b in page.results.iter().take(3) {
-                println!("  {b:?}");
-            }
-            assert!(page.results.iter().all(|b| b.extension == ext));
-            assert!(!page.results.is_empty());
+        let page = client.search("dune herbert", 2).unwrap();
+        println!("{} pages, {} results on page 2", page.total_pages, page.results.len());
+        for b in page.results.iter().take(3) {
+            println!("  {b:?}");
         }
+        assert_eq!(page.results.len(), 25);
     }
 
     /// Downloads a small public-domain book to a temp dir and checks it's a real EPUB.
@@ -323,8 +306,8 @@ mod tests {
     #[ignore]
     fn live_download() {
         let client = LibgenClient::new(BASE).unwrap();
-        let page = client.search("pride and prejudice austen", "epub", 1).unwrap();
-        let book = page.results.iter().min_by_key(|b| b.size.contains("MB")).unwrap();
+        let page = client.search("pride and prejudice austen", 1).unwrap();
+        let book = page.results.iter().filter(|b| b.extension == "epub").min_by_key(|b| b.size.contains("MB")).unwrap();
         let dir = std::env::temp_dir().join("bookgrab-test");
         let path = client.download(book, &dir, |_, _| {}).unwrap();
         let bytes = std::fs::read(&path).unwrap();
