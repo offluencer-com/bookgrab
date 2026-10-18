@@ -1,0 +1,28 @@
+[package]
+name = "bookgrab"
+version = "0.1.0"
+edition = "2024"
+description = "Terminal UI for searching AudiobookBay and sending magnets to qBittorrent"
+license = "MIT"
+repository = "https://github.com/offluencer-com/bookgrab"
+keywords = ["audiobook", "tui", "torrent", "qbittorrent"]
+categories = ["command-line-utilities"]
+exclude = ["docs/", "packaging/"]
+
+[dependencies]
+anyhow = "1.0.104"
+crossterm = "0.29.0"
+directories = "6.0.0"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+ratatui = "0.30.2"
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "cookies", "rustls", "form", "charset"] }
+scraper = "0.27.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+urlencoding = "2.1.3"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
