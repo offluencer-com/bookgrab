@@ -30,9 +30,11 @@ details, and press Enter:
 
 ## Screenshots
 
-| Search results with cover and details | Sent to qBittorrent |
+| Start screen: pick a type | ♫ Audiobook results |
 |---|---|
-| ![Search results](docs/screenshot-search.png) | ![qBittorrent](docs/screenshot-qbittorrent.png) |
+| ![Start screen](docs/screenshot-welcome.png) | ![Audiobook results](docs/screenshot-audiobook.png) |
+| **◧ EPUB results** | **▤ PDF saved to ~/Documents/Ebooks** |
+| ![EPUB results](docs/screenshot-epub.png) | ![PDF download](docs/screenshot-pdf.png) |
 
 ## Requirements
 

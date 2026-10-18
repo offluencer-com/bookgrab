@@ -640,9 +640,9 @@ impl App {
             Line::default(),
             Line::from("  What are you looking for?").bold(),
             Line::default(),
-            row(Kind::Audiobook, "AudiobookBay, sent to qBittorrent as a torrent"),
-            row(Kind::Epub, "ebook for e-readers and phones, saved directly"),
-            row(Kind::Pdf, "ebook or document, saved directly"),
+            row(Kind::Audiobook, "AudiobookBay → qBittorrent"),
+            row(Kind::Epub, "LibGen, for e-readers & phones"),
+            row(Kind::Pdf, "LibGen, books & documents"),
             Line::default(),
             Line::from("  Tab / Shift+Tab switches the type, Enter searches.").dim(),
         ]
