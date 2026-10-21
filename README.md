@@ -49,29 +49,37 @@ details, and press Enter:
 
 ## Installation
 
-### Arch Linux (AUR)
+### Prebuilt binary (any Linux distribution)
+
+Each [release](https://github.com/offluencer-com/bookgrab/releases) has a static x86_64
+binary that runs on any Linux distribution, with no extra libraries needed:
 
 ```sh
-yay -S bookgrab
+curl -L https://github.com/offluencer-com/bookgrab/releases/latest/download/bookgrab-x86_64-linux.tar.gz | tar xz bookgrab
+mkdir -p ~/.local/bin
+mv bookgrab ~/.local/bin/
 ```
 
-`paru -S bookgrab` or any other AUR helper works too. If qBittorrent isn't installed yet:
+Make sure `~/.local/bin` is in your `PATH`. To update, run the same commands again.
+
+### With Cargo
+
+If you have [Rust](https://rustup.rs) installed:
+
+```sh
+cargo install --git https://github.com/offluencer-com/bookgrab
+```
+
+This puts the `bookgrab` binary in `~/.cargo/bin`, so make sure that directory is in your `PATH`.
+
+### Arch Linux (AUR)
+
+An AUR package is coming soon. Until then, use the prebuilt binary above. To install
+qBittorrent:
 
 ```sh
 sudo pacman -S qbittorrent
 ```
-
-### From source (any Linux distribution)
-
-You need [Rust](https://rustup.rs) (`cargo`):
-
-```sh
-git clone https://github.com/offluencer-com/bookgrab.git
-cd bookgrab
-cargo install --path .
-```
-
-This puts the `bookgrab` binary in `~/.cargo/bin`, so make sure that directory is in your `PATH`.
 
 ## Usage
 
