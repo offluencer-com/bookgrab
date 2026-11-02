@@ -1,8 +1,8 @@
 [package]
 name = "bookgrab"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
-description = "Terminal UI for finding audiobooks (AudiobookBay → qBittorrent) and EPUB/PDF ebooks (LibGen)"
+description = "Find audiobooks and EPUB/PDF ebooks from your terminal: cover art, language filter, one-key download"
 license = "MIT"
 repository = "https://github.com/offluencer-com/bookgrab"
 keywords = ["audiobook", "ebook", "tui", "qbittorrent", "libgen"]
