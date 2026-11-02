@@ -1,5 +1,9 @@
 # bookgrab
 
+<a href="docs/promo.mp4"><img src="docs/promo.gif" alt="bookgrab promo: the terminal UI in 3D, a search for Moby Dick, and first editions of classic books" width="100%"></a>
+
+<sub>Promo with sound: [docs/promo.mp4](docs/promo.mp4). Made with [huashu-motion](https://github.com/alchaincyf/huashu-motion). Covers and painting (Carl Spitzweg, *The Bookworm*, c. 1850) are public domain, from Wikimedia Commons. Music samples: Salamander Grand Piano V3 by Alexander Holm (CC BY 3.0) and CC0 instruments.</sub>
+
 **Find audiobooks and ebooks from your terminal.** Pick what you're looking for
 (**audiobook**, **EPUB** or **PDF**), type a title, browse the results with cover art and
 details, and press Enter:
