@@ -17,6 +17,12 @@ no account needed.
 > bookgrab is only a search client. It hosts nothing, and you are responsible for following copyright law
 > where you live.
 
+| | |
+|---|---|
+| ![The terminal in 3D: Audiobooks, EPUB, PDF](docs/shot-1-terminal.jpg) | ![1850: you needed a ladder. 2026: you need one line.](docs/shot-2-one-line.jpg) |
+
+![Audiobooks, EPUB and PDF: first-edition covers](docs/shot-3-every-book.jpg)
+
 ## Install
 
 Linux, x86_64. Download the static binary from the [latest release](https://github.com/offluencer-com/bookgrab/releases/latest):
